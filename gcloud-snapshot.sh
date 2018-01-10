@@ -19,10 +19,12 @@ export PATH=$PATH:/usr/local/bin/:/usr/bin
 #
 
 usage() {
-  echo -e "\nUsage: $0 [-d <days>]" 1>&2
+  echo -e "\nUsage: $0 [-d <days>] [-i <gce instance name>] [-z gcp zone]" 1>&2
   echo -e "\nOptions:\n"
   echo -e "    -d    Number of days to keep snapshots.  Snapshots older than this number deleted."
   echo -e "          Default if not set: 7 [OPTIONAL]"
+  echo -e "    -i    Instance name [OPTIONAL - if not set, figures out instance that this script is running on]"
+  echo -e "    -z    Instance zone [OPTIONAL - if not set, figures out instance that this script is running on]"
   echo -e "\n"
   exit 1
 }
@@ -34,10 +36,16 @@ usage() {
 
 setScriptOptions()
 {
-    while getopts ":d:" o; do
+    while getopts ":d:i:z:" o; do
       case "${o}" in
         d)
           opt_d=${OPTARG}
+          ;;
+        i)
+          opt_i=${OPTARG}
+          ;;
+        z)
+          opt_z=${OPTARG}
           ;;
 
         *)
@@ -52,6 +60,15 @@ setScriptOptions()
     else
       OLDER_THAN=7
     fi
+
+    if [[ -n $opt_i ]];then
+      INSTANCE_NAME_OVERRIDE=$opt_i
+    fi
+
+    if [[ -n $opt_z ]];then
+      INSTANCE_ZONE_OVERRIDE=$opt_z
+    fi
+
 }
 
 
@@ -61,11 +78,15 @@ setScriptOptions()
 
 getInstanceName()
 {
-    # get the name for this vm
-    local instance_name="$(curl -s "http://metadata.google.internal/computeMetadata/v1/instance/hostname" -H "Metadata-Flavor: Google")"
+    if [[ -n $INSTANCE_NAME_OVERRIDE ]]; then
+      echo $INSTANCE_NAME_OVERRIDE
+    else
+      # get the name for this vm
+      local instance_name="$(curl -s "http://metadata.google.internal/computeMetadata/v1/instance/hostname" -H "Metadata-Flavor: Google")"
 
-    # strip out the instance name from the fullly qualified domain name the google returns
-    echo -e "${instance_name%%.*}"
+      # strip out the instance name from the fullly qualified domain name the google returns
+      echo -e "${instance_name%%.*}"
+    fi
 }
 
 
@@ -75,7 +96,13 @@ getInstanceName()
 
 getInstanceId()
 {
+  if [[ -n $INSTANCE_NAME_OVERRIDE ]]; then
+    local instance_id
+    instance_id="$(gcloud compute instances describe ${INSTANCE_NAME_OVERRIDE} --zone ${INSTANCE_ZONE} | grep ^id:)"
+    echo $instance_id | cut -d "'" -f 2
+  else
     echo -e "$(curl -s "http://metadata.google.internal/computeMetadata/v1/instance/id" -H "Metadata-Flavor: Google")"
+  fi
 }
 
 
@@ -85,10 +112,14 @@ getInstanceId()
 
 getInstanceZone()
 {
-    local instance_zone="$(curl -s "http://metadata.google.internal/computeMetadata/v1/instance/zone" -H "Metadata-Flavor: Google")"
+    if [[ -n $INSTANCE_ZONE_OVERRIDE ]]; then
+      echo $INSTANCE_ZONE_OVERRIDE
+    else
+      local instance_zone="$(curl -s "http://metadata.google.internal/computeMetadata/v1/instance/zone" -H "Metadata-Flavor: Google")"
 
-    # strip instance zone out of response
-    echo -e "${instance_zone##*/}"
+      # strip instance zone out of response
+      echo -e "${instance_zone##*/}"
+    fi
 }
 
 
@@ -189,7 +220,7 @@ getSnapshotCreatedDate()
 
     #  format date
     echo -e "$(date -d ${snapshot_datetime%?????} +%Y%m%d)"
-    
+
     # Previous Method of formatting date, which caused issues with older Centos
     #echo -e "$(date -d ${snapshot_datetime} +%Y%m%d)"
 }
@@ -263,11 +294,11 @@ createSnapshotWrapper()
     # get the instance name
     INSTANCE_NAME=$(getInstanceName)
 
-    # get the device id
-    INSTANCE_ID=$(getInstanceId)
-
     # get the instance zone
     INSTANCE_ZONE=$(getInstanceZone)
+
+    # get the device id
+    INSTANCE_ID=$(getInstanceId)
 
     # get a list of all the devices
     DEVICE_LIST=$(getDeviceList ${INSTANCE_NAME})
@@ -276,7 +307,7 @@ createSnapshotWrapper()
     echo "${DEVICE_LIST}" | while read DEVICE_NAME
     do
         # create snapshot name
-        SNAPSHOT_NAME=$(createSnapshotName ${DEVICE_NAME} ${INSTANCE_ID} ${DATE_TIME})        
+        SNAPSHOT_NAME=$(createSnapshotName ${DEVICE_NAME} ${INSTANCE_ID} ${DATE_TIME})
 
         # create the snapshot
         OUTPUT_SNAPSHOT_CREATION=$(createSnapshot ${DEVICE_NAME} ${SNAPSHOT_NAME} ${INSTANCE_ZONE})
