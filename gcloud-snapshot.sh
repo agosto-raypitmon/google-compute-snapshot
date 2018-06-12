@@ -99,6 +99,7 @@ getInstanceId()
   if [[ -n $INSTANCE_NAME_OVERRIDE ]]; then
     local instance_id
     instance_id="$(gcloud compute instances describe ${INSTANCE_NAME_OVERRIDE} --zone ${INSTANCE_ZONE} | grep ^id:)"
+
     echo $instance_id | cut -d "'" -f 2
   else
     echo -e "$(curl -s "http://metadata.google.internal/computeMetadata/v1/instance/id" -H "Metadata-Flavor: Google")"
@@ -131,7 +132,7 @@ getInstanceZone()
 
 getDeviceList()
 {
-    echo "$(gcloud compute disks list --filter users~$1\$ --format='value(name)')"
+    echo "$(gcloud compute disks list --filter users~$1 --format='value(name)')"
 }
 
 
@@ -293,15 +294,25 @@ createSnapshotWrapper()
 
     # get the instance name
     INSTANCE_NAME=$(getInstanceName)
+    echo "*****************************************"
+    echo "$INSTANCE_NAME BACKUP"
 
     # get the instance zone
     INSTANCE_ZONE=$(getInstanceZone)
+    echo -e "\tZone: $INSTANCE_ZONE"
 
     # get the device id
     INSTANCE_ID=$(getInstanceId)
+    if [ -z $INSTANCE_ID ]
+    then
+	    echo "ERROR: UNKNOWN INSTANCE ID FOR NAME $INSTANCE_NAME"
+	    exit 1
+    fi
+    echo -e "\tInstance ID: $INSTANCE_ID"
 
     # get a list of all the devices
     DEVICE_LIST=$(getDeviceList ${INSTANCE_NAME})
+    echo -e "\tDevice List: $DEVICE_LIST"
 
     # create the snapshots
     echo "${DEVICE_LIST}" | while read DEVICE_NAME
@@ -351,11 +362,13 @@ deleteSnapshotsWrapper()
 ##                      ##
 ##########################
 
-# log time
-logTime "Start of Script"
 
 # set options from script input / default value
 setScriptOptions "$@"
+
+# log time
+echo "Executing script: $0 $@ "
+logTime "Start of Script"
 
 # create snapshot
 createSnapshotWrapper
