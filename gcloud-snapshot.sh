@@ -149,7 +149,12 @@ getInstanceZone()
 
 getDeviceList()
 {
-    echo "$(gcloud compute disks list --filter users~$1 --format='value(name)')"
+    local ES
+    local OUTPUT
+    OUTPUT="$(gcloud compute disks list --filter users~$1 --format='value(name)' 2>&1)"
+    ES=$?
+    echo -e "$OUTPUT"
+    exit $ES
 }
 
 
@@ -169,7 +174,7 @@ createSnapshotName()
     # truncate vm name to 41 chars to be save
     local name="gcs-${1:0:40}-$2-$3"
 
-    echo -e ${name}
+    echo -e "${name}"
 }
 
 
@@ -181,7 +186,14 @@ createSnapshotName()
 
 createSnapshot()
 {
-    echo -e "$(gcloud compute disks snapshot $1 --snapshot-names $2 --zone $3 2>&1)"
+
+    local ES
+    local OUTPUT
+    OUTPUT="$(gcloud compute disks snapshot $1 --snapshot-names $2 --zone $3 2>&1)"
+    ES=$?
+    echo -e "$OUTPUT"
+    exit $ES
+
 }
 
 
@@ -198,7 +210,13 @@ getSnapshots()
     SNAPSHOTS=()
 
     # get list of snapshots from gcloud for this device
-    local gcloud_response="$(gcloud compute snapshots list --filter="name~'"$1"'" --uri)"
+    local gcloud_response
+    gcloud_response="$(gcloud compute snapshots list --filter="name~'"$1"'" --uri)"
+    ES=$?
+    if [ $ES -gt 0 ]; then
+      logger ERROR "Error getting snapshot list, exiting."
+      exit $ES
+    fi
 
     # loop through and get snapshot name from URI
     while read line
@@ -221,13 +239,16 @@ getSnapshots()
 
 getSnapshotCreatedDate()
 {
-    local snapshot_datetime="$(gcloud compute snapshots describe $1 | grep "creationTimestamp" | cut -d " " -f 2 | tr -d \')"
-
+    local snapshot_datetime
+    local ES
+    snapshot_datetime="$(gcloud compute snapshots describe $1 | grep "creationTimestamp" | cut -d " " -f 2 | tr -d \')"
+    if [ -z "$snapshot_datetime" ]; then
+        logger ERROR "Problem getting snapshot creation time for deleting"
+        exit 1
+    fi
     #  format date
     echo -e "$(date -d ${snapshot_datetime%?????} +%Y%m%d)"
 
-    # Previous Method of formatting date, which caused issues with older Centos
-    #echo -e "$(date -d ${snapshot_datetime} +%Y%m%d)"
 }
 
 
@@ -270,7 +291,12 @@ checkSnapshotDeletion()
 
 deleteSnapshot()
 {
-    echo -e "$(gcloud compute snapshots delete $1 -q)"
+    local ES
+    local OUTPUT
+    OUTPUT="$(gcloud compute snapshots delete $1 -q 2>&1)"
+    ES=$?
+    echo -e "$OUTPUT"
+    exit $ES
 }
 
 
@@ -286,7 +312,8 @@ logger()
         gcloud logging write $GCLOUD_LOG "$2" --severity $1 > /dev/null 2>&1
     fi
     if [ -n "$BACKUP_LOGFILE" ]; then
-        echo -e "$datetime - $1 - $2" >> $BACKUP_LOGFILE 2>&1
+        echo -e -n "$datetime - $1 - " >> $BACKUP_LOGFILE 2>&1
+        echo -e $2 >> $BACKUP_LOGFILE 2>&1
     fi
     if [ -z "$BACKUP_LOGFILE" ] && [ -z "$GCLOUD_LOG" ]; then
         echo -e "$datetime - $1 - $2" 1>&2
@@ -321,7 +348,16 @@ createSnapshotWrapper()
 
     # get a list of all the devices
     DEVICE_LIST=$(getDeviceList ${INSTANCE_NAME})
-
+    ES=$?
+    if [ $ES -gt 0 ]; then
+      logger ERROR "Error getting device list, exiting."
+      exit $ES
+    fi
+    if [ -z "$DEVICE_LIST" ]; then
+      logger WARN "Device list was empty, exiting."
+      exit 1
+    fi
+   
     # Device list show on one line
     logger INFO "\tDevice List: $(echo $DEVICE_LIST)"
 
@@ -337,9 +373,16 @@ createSnapshotWrapper()
         SNAPSHOT_NAME=$(createSnapshotName ${INSTANCE_NAME} ${DEV_NUM} ${DATE_TIME})
 
         # create the snapshot
-        logger INFO "createSnapshot ${DEVICE_NAME} ${SNAPSHOT_NAME} ${INSTANCE_ZONE}"
+        logger INFO "Running: createSnapshot |${DEVICE_NAME}|${SNAPSHOT_NAME}|${INSTANCE_ZONE}|"
         OUTPUT_SNAPSHOT_CREATION=$(createSnapshot ${DEVICE_NAME} ${SNAPSHOT_NAME} ${INSTANCE_ZONE} 2>&1)
-        logger INFO "$OUTPUT_SNAPSHOT_CREATION"
+        ES=$?
+	if [ $ES -gt 0 ]; then
+            # Don't want to exit because other snapshots might work since we could have a list
+	    logger ERROR "Error creating snapshot:"
+            logger ERROR "$OUTPUT_SNAPSHOT_CREATION"
+	else
+            logger INFO "$OUTPUT_SNAPSHOT_CREATION"
+        fi
     done
 }
 
@@ -350,24 +393,38 @@ deleteSnapshotsWrapper()
 
     # get the deletion date for snapshots
     DELETION_DATE=$(getSnapshotDeletionDate "${OLDER_THAN}")
+    logger INFO "Deleting snapshots older than this date: ${DELETION_DATE}"
 
     # Truncate instance name to 40 chars
     SHORT_INSTANCE_NAME=${INSTANCE_NAME:0:40}
     # get list of snapshots for regex - saved in global array
     getSnapshots "gcs-.*${SHORT_INSTANCE_NAME}-.*"
+    ES=$?
+    if [ $ES -gt 0 ]; then
+      logger ERROR "Error getting snapshot list for deletion, exiting."
+      exit $ES
+    fi
 
     # loop through snapshots
     for snapshot in "${SNAPSHOTS[@]}"
     do
         # get created date for snapshot
         SNAPSHOT_CREATED_DATE=$(getSnapshotCreatedDate ${snapshot})
+        
+        if [ -n "$SNAPSHOT_CREATED_DATE" ]; then
+            # check if snapshot needs to be deleted
+            DELETION_CHECK=$(checkSnapshotDeletion ${DELETION_DATE} ${SNAPSHOT_CREATED_DATE})
 
-        # check if snapshot needs to be deleted
-        DELETION_CHECK=$(checkSnapshotDeletion ${DELETION_DATE} ${SNAPSHOT_CREATED_DATE})
-
-        # delete snapshot
-        if [ "${DELETION_CHECK}" -eq "1" ]; then
-           OUTPUT_SNAPSHOT_DELETION=$(deleteSnapshot ${snapshot})
+            # delete snapshot
+            if [ "${DELETION_CHECK}" -eq "1" ]; then
+                OUTPUT_SNAPSHOT_DELETION=$(deleteSnapshot ${snapshot} 2>&1)
+                ES=$?
+                if [ $ES -gt 0 ]; then
+                    logger ERROR "Problem deleting snapshot: $OUTPUT_SNAPSHOT_DELETION"
+                else
+                    logger INFO "$OUTPUT_SNAPSHOT_DELETION"
+                fi
+            fi
         fi
 
     done
