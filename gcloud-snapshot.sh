@@ -19,12 +19,15 @@ export PATH=$PATH:/usr/local/bin/:/usr/bin
 #
 
 usage() {
-  echo -e "\nUsage: $0 [-d <days>] [-i <gce instance name>] [-z gcp zone]" 1>&2
+  echo -e "\nUsage: $0 [-d <days>] [-i <gce instance name>] [-z gcp zone] [-g log_name] [-l logfile]" 1>&2
   echo -e "\nOptions:\n"
   echo -e "    -d    Number of days to keep snapshots.  Snapshots older than this number deleted."
   echo -e "          Default if not set: 7 [OPTIONAL]"
   echo -e "    -i    Instance name [OPTIONAL - if not set, figures out instance that this script is running on]"
   echo -e "    -z    Instance zone [OPTIONAL - if not set, figures out instance that this script is running on]"
+  echo -e "    -g    GCloud Logging [OPTIONAL - if set, will use gcloud logging to write to stackdriver, using value as the log_name]"
+  echo -e "    -l    Log file [OPTIONAL - if set, will write to this logfile using value as the file name]"
+  echo -e "    Note: If both -g and -l are not set, it will log to stdout"
   echo -e "\n"
   exit 1
 }
@@ -36,7 +39,7 @@ usage() {
 
 setScriptOptions()
 {
-    while getopts ":d:i:z:" o; do
+    while getopts ":d:i:z:l:g:" o; do
       case "${o}" in
         d)
           opt_d=${OPTARG}
@@ -46,6 +49,12 @@ setScriptOptions()
           ;;
         z)
           opt_z=${OPTARG}
+          ;;
+        l)
+          opt_l=${OPTARG}
+          ;;
+        g)
+          opt_g=${OPTARG}
           ;;
 
         *)
@@ -67,6 +76,14 @@ setScriptOptions()
 
     if [[ -n $opt_z ]];then
       INSTANCE_ZONE_OVERRIDE=$opt_z
+    fi
+
+    if [[ -n $opt_l ]];then
+      BACKUP_LOGFILE=$opt_l
+    fi
+
+    if [[ -n $opt_g ]];then
+      GCLOUD_LOG=$opt_g
     fi
 
 }
@@ -142,28 +159,15 @@ getDeviceList()
 
 createSnapshotName()
 {
-    # create snapshot name
-    local name="gcs-$1-$2-$3"
 
-    # google compute snapshot name cannot be longer than 62 characters
-    local name_max_len=62
+    # new args: ${VM_NAME} ${disknum} ${DATE_TIME}
+    # old args: ${DEVICE_NAME} ${INSTANCE_ID} ${DATE_TIME}
 
-    # check if snapshot name is longer than max length
-    if [ ${#name} -ge ${name_max_len} ]; then
+    # new snapshot name:
+    # gcs-VMNAME-disknum-secondsince
 
-        # work out how many characters we require - prefix + device id + timestamp
-        local req_chars="gcs--$2-$3"
-
-        # work out how many characters that leaves us for the device name
-        local device_name_len=`expr ${name_max_len} - ${#req_chars}`
-
-        # shorten the device name
-        local device_name=${1:0:device_name_len}
-
-        # create new (acceptable) snapshot name
-        name="gcs-${device_name}-$2-$3" ;
-
-    fi
+    # truncate vm name to 41 chars to be save
+    local name="gcs-${1:0:40}-$2-$3"
 
     echo -e ${name}
 }
@@ -172,12 +176,12 @@ createSnapshotName()
 #
 # CREATES SNAPSHOT AND RETURNS OUTPUT
 #
-# input: ${DEVICE_NAME}, ${SNAPSHOT_NAME}, ${INSTANCE_ZONE}
+# input: ${DISK_NAME}, ${SNAPSHOT_NAME}, ${INSTANCE_ZONE}
 #
 
 createSnapshot()
 {
-    echo -e "$(gcloud compute disks snapshot $1 --snapshot-names $2 --zone $3)"
+    echo -e "$(gcloud compute disks snapshot $1 --snapshot-names $2 --zone $3 2>&1)"
 }
 
 
@@ -270,10 +274,24 @@ deleteSnapshot()
 }
 
 
-logTime()
+
+# Log stuff
+# Takes 2 args:
+# - Severity (ERROR, WARN, INFO, DEBUG)
+# - Message
+logger()
 {
     local datetime="$(date +"%Y-%m-%d %T")"
-    echo -e "$datetime: $1"
+    if [ -n "$GCLOUD_LOG" ]; then
+        gcloud logging write $GCLOUD_LOG "$2" --severity $1 > /dev/null 2>&1
+    fi
+    if [ -n "$BACKUP_LOGFILE" ]; then
+        echo -e "$datetime - $1 - $2" >> $BACKUP_LOGFILE 2>&1
+    fi
+    if [ -z "$BACKUP_LOGFILE" ] && [ -z "$GCLOUD_LOG" ]; then
+        echo -e "$datetime - $1 - $2" 1>&2
+    fi
+
 }
 
 
@@ -287,54 +305,56 @@ logTime()
 createSnapshotWrapper()
 {
     # log time
-    logTime "Start of createSnapshotWrapper"
+    logger INFO "Start of createSnapshotWrapper"
 
     # get date time
     DATE_TIME="$(date "+%s")"
 
     # get the instance name
     INSTANCE_NAME=$(getInstanceName)
-    echo "*****************************************"
-    echo "$INSTANCE_NAME BACKUP"
+    logger INFO "*****************************************"
+    logger INFO "\tBACKUP $INSTANCE_NAME"
 
     # get the instance zone
     INSTANCE_ZONE=$(getInstanceZone)
-    echo -e "\tZone: $INSTANCE_ZONE"
-
-    # get the device id
-    INSTANCE_ID=$(getInstanceId)
-    if [ -z $INSTANCE_ID ]
-    then
-	    echo "ERROR: UNKNOWN INSTANCE ID FOR NAME $INSTANCE_NAME"
-	    exit 1
-    fi
-    echo -e "\tInstance ID: $INSTANCE_ID"
+    logger INFO "\tZone: $INSTANCE_ZONE"
 
     # get a list of all the devices
     DEVICE_LIST=$(getDeviceList ${INSTANCE_NAME})
-    echo -e "\tDevice List: $DEVICE_LIST"
+
+    # Device list show on one line
+    logger INFO "\tDevice List: $(echo $DEVICE_LIST)"
 
     # create the snapshots
+    DEV_NUM=0
     echo "${DEVICE_LIST}" | while read DEVICE_NAME
     do
         # create snapshot name
-        SNAPSHOT_NAME=$(createSnapshotName ${DEVICE_NAME} ${INSTANCE_ID} ${DATE_TIME})
+        let DEV_NUM=DEV_NUM+1
+        DATE_TIME="$(date "+%s")"
+        sleep 1
+        
+        SNAPSHOT_NAME=$(createSnapshotName ${INSTANCE_NAME} ${DEV_NUM} ${DATE_TIME})
 
         # create the snapshot
-        OUTPUT_SNAPSHOT_CREATION=$(createSnapshot ${DEVICE_NAME} ${SNAPSHOT_NAME} ${INSTANCE_ZONE})
+        logger INFO "createSnapshot ${DEVICE_NAME} ${SNAPSHOT_NAME} ${INSTANCE_ZONE}"
+        OUTPUT_SNAPSHOT_CREATION=$(createSnapshot ${DEVICE_NAME} ${SNAPSHOT_NAME} ${INSTANCE_ZONE} 2>&1)
+        logger INFO "$OUTPUT_SNAPSHOT_CREATION"
     done
 }
 
 deleteSnapshotsWrapper()
 {
     # log time
-    logTime "Start of deleteSnapshotsWrapper"
+    logger INFO "Start of deleteSnapshotsWrapper"
 
     # get the deletion date for snapshots
     DELETION_DATE=$(getSnapshotDeletionDate "${OLDER_THAN}")
 
+    # Truncate instance name to 40 chars
+    SHORT_INSTANCE_NAME=${INSTANCE_NAME:0:40}
     # get list of snapshots for regex - saved in global array
-    getSnapshots "gcs-.*${INSTANCE_ID}-.*"
+    getSnapshots "gcs-.*${SHORT_INSTANCE_NAME}-.*"
 
     # loop through snapshots
     for snapshot in "${SNAPSHOTS[@]}"
@@ -367,8 +387,7 @@ deleteSnapshotsWrapper()
 setScriptOptions "$@"
 
 # log time
-echo "Executing script: $0 $@ "
-logTime "Start of Script"
+logger INFO "Executing script: $0 $@ "
 
 # create snapshot
 createSnapshotWrapper
@@ -377,4 +396,4 @@ createSnapshotWrapper
 deleteSnapshotsWrapper
 
 # log time
-logTime "End of Script"
+logger INFO "End of Backup Script"
