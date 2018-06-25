@@ -23,8 +23,9 @@ usage() {
   echo -e "\nOptions:\n"
   echo -e "    -d    Number of days to keep snapshots.  Snapshots older than this number deleted."
   echo -e "          Default if not set: 7 [OPTIONAL]"
-  echo -e "    -i    Instance name [OPTIONAL - if not set, figures out instance that this script is running on]"
+  echo -e "    -i    Instance id [OPTIONAL - if not set, figures out instance that this script is running on]"
   echo -e "    -z    Instance zone [OPTIONAL - if not set, figures out instance that this script is running on]"
+  echo -e "    -p    Backup All VMs in specified project - [OPTIONAL - if set, script will find all VMs in a project, -i and -z are ignored]"
   echo -e "    -g    GCloud Logging [OPTIONAL - if set, will use gcloud logging to write to stackdriver, using value as the log_name]"
   echo -e "    -l    Log file [OPTIONAL - if set, will write to this logfile using value as the file name]"
   echo -e "    Note: If both -g and -l are not set, it will log to stdout"
@@ -39,7 +40,7 @@ usage() {
 
 setScriptOptions()
 {
-    while getopts ":d:i:z:l:g:" o; do
+    while getopts ":d:i:z:l:g:p:" o; do
       case "${o}" in
         d)
           opt_d=${OPTARG}
@@ -55,6 +56,9 @@ setScriptOptions()
           ;;
         g)
           opt_g=${OPTARG}
+          ;;
+        p)
+          opt_p=${OPTARG}
           ;;
 
         *)
@@ -84,6 +88,10 @@ setScriptOptions()
 
     if [[ -n $opt_g ]];then
       GCLOUD_LOG=$opt_g
+    fi
+
+    if [[ -n $opt_p ]];then
+      GCP_PROJ=$opt_p
     fi
 
 }
@@ -151,7 +159,7 @@ getDeviceList()
 {
     local ES
     local OUTPUT
-    OUTPUT="$(gcloud compute disks list --filter users~$1 --format='value(name)' 2>&1)"
+    OUTPUT="$(gcloud compute disks list --filter users~$1\$ --format='value(name)' 2>&1)"
     ES=$?
     echo -e "$OUTPUT"
     exit $ES
@@ -431,6 +439,28 @@ deleteSnapshotsWrapper()
 }
 
 
+backupProject()
+{
+    logger INFO "Grabbing all vm's in the project: ${GCP_PROJ}"
+    local vm_list="$(gcloud compute instances list --format='value(name,zone)' --project ${GCP_PROJ})"
+    # Split on new line character
+    IFS=$'\n'
+    for i in ${vm_list[*]}
+    do
+        INSTANCE_NAME_OVERRIDE="$(echo ${i} | awk {'print $1'})"
+        INSTANCE_ZONE_OVERRIDE="$(echo ${i} | awk {'print $2'})"
+
+        # create snapshot
+        createSnapshotWrapper
+
+        # delete snapshots older than 'x' days
+        deleteSnapshotsWrapper
+        
+    done
+}
+
+
+
 
 
 ##########################
@@ -440,17 +470,29 @@ deleteSnapshotsWrapper()
 ##########################
 
 
+# get current GCP Project before running script
+ORIGINAL_PROJECT=`gcloud config -q get-value project`
+
 # set options from script input / default value
 setScriptOptions "$@"
 
 # log time
 logger INFO "Executing script: $0 $@ "
 
-# create snapshot
-createSnapshotWrapper
+# if project is set, run on all VMs
+if [ -n "${GCP_PROJ}" ]; then
+    # set project and do each VM
+    gcloud config -q set project ${GCP_PROJ}
+    backupProject
+else
+    # do it for a single VM
+    createSnapshotWrapper
+    deleteSnapshotsWrapper
+fi
 
-# delete snapshots older than 'x' days
-deleteSnapshotsWrapper
 
 # log time
 logger INFO "End of Backup Script"
+
+# set original project for gcloud default
+gcloud config -q set project $ORIGINAL_PROJECT
