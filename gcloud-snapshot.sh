@@ -27,6 +27,7 @@ usage() {
   echo -e "    -z    Instance zone [OPTIONAL - if not set, figures out instance that this script is running on]"
   echo -e "    -p    Backup All VMs in specified project - [OPTIONAL - if set, script will find all VMs in a project, -i and -z are ignored]"
   echo -e "    -g    GCloud Logging [OPTIONAL - if set, will use gcloud logging to write to stackdriver, using value as the log_name]"
+  echo -e "          Note: gcloud logging writes to original project that VM is in, even if -p is specified"
   echo -e "    -l    Log file [OPTIONAL - if set, will write to this logfile using value as the file name]"
   echo -e "    Note: If both -g and -l are not set, it will log to stdout"
   echo -e "\n"
@@ -317,7 +318,7 @@ logger()
 {
     local datetime="$(date +"%Y-%m-%d %T")"
     if [ -n "$GCLOUD_LOG" ]; then
-        gcloud logging write $GCLOUD_LOG "$2" --severity $1 > /dev/null 2>&1
+        gcloud logging write $GCLOUD_LOG "$2" --severity $1 --project $ORIGINAL_PROJECT > /dev/null 2>&1
     fi
     if [ -n "$BACKUP_LOGFILE" ]; then
         echo -e -n "$datetime - $1 - " >> $BACKUP_LOGFILE 2>&1
@@ -339,20 +340,17 @@ logger()
 
 createSnapshotWrapper()
 {
-    # log time
-    logger INFO "Start of createSnapshotWrapper"
 
     # get date time
     DATE_TIME="$(date "+%s")"
 
     # get the instance name
     INSTANCE_NAME=$(getInstanceName)
-    logger INFO "*****************************************"
-    logger INFO "\tBACKUP $INSTANCE_NAME"
+    logger INFO "    BACKUP $INSTANCE_NAME"
 
     # get the instance zone
     INSTANCE_ZONE=$(getInstanceZone)
-    logger INFO "\tZone: $INSTANCE_ZONE"
+    logger INFO "    Zone: $INSTANCE_ZONE"
 
     # get a list of all the devices
     DEVICE_LIST=$(getDeviceList ${INSTANCE_NAME})
@@ -366,8 +364,8 @@ createSnapshotWrapper()
       exit 1
     fi
    
-    # Device list show on one line
-    logger INFO "\tDevice List: $(echo $DEVICE_LIST)"
+    # Device list log on one line
+    logger INFO "    Device List: $(echo $DEVICE_LIST)"
 
     # create the snapshots
     DEV_NUM=0
@@ -396,9 +394,6 @@ createSnapshotWrapper()
 
 deleteSnapshotsWrapper()
 {
-    # log time
-    logger INFO "Start of deleteSnapshotsWrapper"
-
     # get the deletion date for snapshots
     DELETION_DATE=$(getSnapshotDeletionDate "${OLDER_THAN}")
     logger INFO "Deleting snapshots older than this date: ${DELETION_DATE}"
@@ -441,7 +436,7 @@ deleteSnapshotsWrapper()
 
 backupProject()
 {
-    logger INFO "Grabbing all vm's in the project: ${GCP_PROJ}"
+    logger INFO "BACKING UP ALL VMs in this GCP Project: ${GCP_PROJ}"
     local vm_list="$(gcloud compute instances list --format='value(name,zone)' --project ${GCP_PROJ})"
     # Split on new line character
     IFS=$'\n'
@@ -450,10 +445,7 @@ backupProject()
         INSTANCE_NAME_OVERRIDE="$(echo ${i} | awk {'print $1'})"
         INSTANCE_ZONE_OVERRIDE="$(echo ${i} | awk {'print $2'})"
 
-        # create snapshot
         createSnapshotWrapper
-
-        # delete snapshots older than 'x' days
         deleteSnapshotsWrapper
         
     done
@@ -469,30 +461,30 @@ backupProject()
 ##                      ##
 ##########################
 
-
-# get current GCP Project before running script
+# get current GCP Project from gcloud before running script
 ORIGINAL_PROJECT=`gcloud config -q get-value project`
+
 
 # set options from script input / default value
 setScriptOptions "$@"
 
 # log time
-logger INFO "Executing script: $0 $@ "
+logger INFO "*****************************************"
+logger INFO "Starting Backup script: $0 $@"
 
 # if project is set, run on all VMs
 if [ -n "${GCP_PROJ}" ]; then
     # set project and do each VM
-    gcloud config -q set project ${GCP_PROJ}
+    gcloud config -q set project ${GCP_PROJ} > /dev/null 2>&1
     backupProject
+    # set default gcp project in gcloud back
+    gcloud config -q set project $ORIGINAL_PROJECT > /dev/null 2>&1
 else
     # do it for a single VM
     createSnapshotWrapper
     deleteSnapshotsWrapper
 fi
 
-
 # log time
 logger INFO "End of Backup Script"
 
-# set original project for gcloud default
-gcloud config -q set project $ORIGINAL_PROJECT
