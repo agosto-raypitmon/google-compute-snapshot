@@ -1,5 +1,7 @@
 # Automatic Snapshots for Google (gcloud) Compute Engine
 
+**NOTE: This readme is a little old - run the script with `-h` to get the latest options!**
+
 Bash script for Automatic Snapshots and Cleanup on Google Compute Engine. **Requires no user input!**
 
 Inspiration (and the installation instructions) taken from AWS script [aws-ec2-ebs-automatic-snapshot-bash](https://github.com/CaseyLabs/aws-ec2-ebs-automatic-snapshot-bash)
