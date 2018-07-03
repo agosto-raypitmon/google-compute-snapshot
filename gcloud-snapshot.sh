@@ -465,12 +465,13 @@ backupProject()
 ##                      ##
 ##########################
 
-# get current GCP Project from gcloud before running script
-ORIGINAL_PROJECT=`gcloud config -q get-value project`
 
 
 # set options from script input / default value
 setScriptOptions "$@"
+
+# get current GCP Project from gcloud before running script
+ORIGINAL_PROJECT=`gcloud config -q get-value project`
 
 # log time
 logger INFO "*****************************************"
